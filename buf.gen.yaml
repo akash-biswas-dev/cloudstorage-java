@@ -1,0 +1,16 @@
+version: v2
+managed:
+  # This configurations is for override the laguage specific options.
+  enabled: true
+  override:
+    - file_option: java_package
+      value: com.cloudstorage.proto
+plugins:
+  - remote: buf.build/protocolbuffers/java:v33.2
+    out: src/main/java
+  - remote: buf.build/grpc/java:v1.78.0
+    out: src/main/java
+    opt:
+      - paths=source_relative
+inputs:
+  - directory: cloudstorage-proto/proto
