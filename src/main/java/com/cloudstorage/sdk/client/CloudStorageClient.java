@@ -5,5 +5,5 @@ import com.cloudstorage.sdk.FileObject;
 
 public interface CloudStorageClient {
 
-    FileObject uploadFile(CloudStorageObject storageObject);
+    FileObject uploadFile(CloudStorageObject storageObject) throws Exception;
 }

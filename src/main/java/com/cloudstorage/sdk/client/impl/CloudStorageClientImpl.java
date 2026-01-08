@@ -5,6 +5,8 @@ import com.cloudstorage.proto.*;
 import com.cloudstorage.sdk.CloudStorageObject;
 import com.cloudstorage.sdk.FileObject;
 import com.cloudstorage.sdk.client.CloudStorageClient;
+import com.cloudstorage.sdk.exceptions.CloudStorageException;
+import com.cloudstorage.sdk.exceptions.InvalidFilePathException;
 import com.google.protobuf.ByteString;
 import io.grpc.ManagedChannel;
 import io.grpc.ManagedChannelBuilder;
@@ -18,6 +20,7 @@ import java.io.InputStream;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.atomic.AtomicReference;
 
 @Slf4j
 public class CloudStorageClientImpl implements CloudStorageClient {
@@ -35,7 +38,7 @@ public class CloudStorageClientImpl implements CloudStorageClient {
     }
 
     @Override
-    public FileObject uploadFile(CloudStorageObject storageObject) {
+    public FileObject uploadFile(CloudStorageObject storageObject) throws Exception{
         Path filePath = storageObject.getFilePath();
 
         Metadata headers = generateMetadata(storageObject.getKey());
@@ -47,8 +50,10 @@ public class CloudStorageClientImpl implements CloudStorageClient {
                                 MetadataUtils
                                         .newAttachHeadersInterceptor(headers));
 
-        final FileObject[] fileObject = new FileObject[1];
         CountDownLatch latch = new CountDownLatch(1);
+        AtomicReference<FileObject> fileObjectReference = new AtomicReference<>();
+        AtomicReference<Throwable> rpcErrorReference = new AtomicReference<>();
+
         StreamObserver<CloudStorageServiceUploadRequest> uploadStreamObserver = cloudStorageServiceStub.upload(
                 new StreamObserver<>() {
                     @Override
@@ -58,16 +63,18 @@ public class CloudStorageClientImpl implements CloudStorageClient {
                             return;
                         }
                         FileDetails fileDetails = cloudStorageServiceUploadResponse.getFileDetails();
-                        fileObject[0] = FileObject.builder()
+                        FileObject fileObject = FileObject.builder()
                                 .fileId(fileDetails.getFileName())
                                 .size(fileDetails.getFileSize())
                                 .accessUrl(fileDetails.getAccessUrl())
                                 .build();
+                        fileObjectReference.set(fileObject);
                     }
 
                     @Override
                     public void onError(Throwable throwable) {
-                        log.error("Some error occurred while streaming the data : {}", throwable.getMessage());
+                        latch.countDown();
+                        rpcErrorReference.set(throwable);
                     }
 
                     @Override
@@ -79,20 +86,29 @@ public class CloudStorageClientImpl implements CloudStorageClient {
         );
         try (InputStream stream = Files.newInputStream(filePath)) {
             byte[] buffer = new byte[1024];
-            while (stream.read(buffer) != -1) {
+            int bytesRead;
+            while ((bytesRead = stream.read(buffer)) != -1) {
                 CloudStorageServiceUploadRequest request = CloudStorageServiceUploadRequest
                         .newBuilder()
-                        .setData(ByteString.copyFrom(buffer))
+                        .setData(ByteString.copyFrom(buffer, 0, bytesRead))
                         .build();
                 uploadStreamObserver.onNext(request);
-                latch.await();
+            }
+            uploadStreamObserver.onCompleted();
+            latch.await();
+            if (rpcErrorReference.get() != null) {
+                throw new RuntimeException("Error occurred while sending data", rpcErrorReference.get());
             }
         } catch (IOException ex) {
-            log.error("Error occurred while reading the file with message: {}", ex.getMessage());
-        } catch (InterruptedException e) {
-            throw new RuntimeException(e);
+            throw new InvalidFilePathException("Invalid file or path provided.");
+        } catch (RuntimeException ex){
+            throw new CloudStorageException("Some internal error occurred while saving the file.");
         }
-        return fileObject[0];
+        FileObject fileObject = fileObjectReference.get();
+        if(fileObject == null){
+            throw new CloudStorageException("Unknown error occurred while saving the file.");
+        }
+        return fileObjectReference.get();
     }
 
     private Metadata generateMetadata(
